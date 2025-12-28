@@ -1,5 +1,5 @@
 // BlackHoleSignature.jsx
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useCallback } from "react";
 import { useFrame, extend } from "@react-three/fiber";
 import {
   AdditiveBlending,
@@ -332,9 +332,8 @@ function CentralSwirlStars({
   );
 }
 
-/* -------------------- EXPLOSION FX (NUEVO) -------------------- */
+/* -------------------- FX -------------------- */
 
-// Flash circular (sprite) - sirve como “bloom” rápido
 function BurstSprite({ spriteTex, burstRef }) {
   const meshRef = useRef();
   const matRef = useRef();
@@ -348,7 +347,6 @@ function BurstSprite({ spriteTex, burstRef }) {
     matRef.current.opacity = a;
     meshRef.current.scale.set(s, s, 1);
 
-    // decay rápido (flash)
     burstRef.current.a = Math.max(0, burstRef.current.a - delta * 3.2);
     burstRef.current.s = Math.max(0, burstRef.current.s - delta * 0.35);
   });
@@ -370,7 +368,6 @@ function BurstSprite({ spriteTex, burstRef }) {
   );
 }
 
-// Onda expansiva tipo ring
 function ShockwaveRing({ shockRef }) {
   const meshRef = useRef();
   const matRef = useRef();
@@ -384,13 +381,16 @@ function ShockwaveRing({ shockRef }) {
     matRef.current.opacity = a;
     meshRef.current.scale.set(s, s, 1);
 
-    // se expande y se desvanece
     shockRef.current.a = Math.max(0, shockRef.current.a - delta * 1.8);
     shockRef.current.s = Math.min(20, shockRef.current.s + delta * 6.0);
   });
 
   return (
-    <mesh ref={meshRef} rotation={[Math.PI / 2.2, 0, 0]} position={[0, 0, 0.06]}>
+    <mesh
+      ref={meshRef}
+      rotation={[Math.PI / 2.2, 0, 0]}
+      position={[0, 0, 0.06]}
+    >
       <ringGeometry args={[1.25, 1.75, 64]} />
       <meshBasicMaterial
         ref={matRef}
@@ -404,8 +404,6 @@ function ShockwaveRing({ shockRef }) {
     </mesh>
   );
 }
-
-/* -------------------- (TU) MICRO-EXPLOSION -------------------- */
 
 function MicroExplosion({ spriteTex, flashRef }) {
   const meshRef = useRef();
@@ -441,7 +439,199 @@ function MicroExplosion({ spriteTex, flashRef }) {
   );
 }
 
+/* -------------------- FX EXTRA (PARTÍCULAS + RAYOS) -------------------- */
+
+function smoothstep(a, b, x) {
+  const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
+  return t * t * (3 - 2 * t);
+}
+
+function BurstParticles({ spriteTex, fxRef, count = 220, seed = 9001 }) {
+  const instRef = useRef();
+  const matRef = useRef();
+  const dummy = useMemo(() => new Object3D(), []);
+
+  const particles = useMemo(() => {
+    const rand = mulberry32(seed);
+    const arr = [];
+    for (let i = 0; i < count; i++) {
+      const a = rand() * Math.PI * 2;
+      const dir = { x: Math.cos(a), y: Math.sin(a) };
+
+      const speed = 2.2 + rand() * 6.5;
+      const spin = (rand() * 2 - 1) * 6.0;
+      const size = 0.03 + rand() * 0.09;
+      const z = 0.03 + rand() * 0.12;
+      const phase = rand() * Math.PI * 2;
+
+      arr.push({ dir, speed, spin, size, z, phase });
+    }
+    return arr;
+  }, [count, seed]);
+
+  useEffect(() => {
+    if (!instRef.current) return;
+    instRef.current.instanceMatrix.setUsage(DynamicDrawUsage);
+  }, []);
+
+  useFrame((state, delta) => {
+    const inst = instRef.current;
+    const mat = matRef.current;
+    if (!inst || !mat) return;
+
+    const fx = fxRef.current;
+    if (!fx.active) {
+      mat.opacity = 0;
+      return;
+    }
+
+    fx.t += delta;
+    const t = fx.t;
+
+    const LIFE = 0.75;
+    const lifeN = Math.min(1, t / LIFE);
+
+    const fadeIn = smoothstep(0.0, 0.08, lifeN);
+    const fadeOut = 1.0 - smoothstep(0.35, 1.0, lifeN);
+    mat.opacity = 0.95 * fadeIn * fadeOut;
+
+    const swirl = 1.8 * (1.0 - lifeN);
+
+    for (let i = 0; i < particles.length; i++) {
+      const p = particles[i];
+
+      const dist = p.speed * t;
+
+      const wob =
+        0.25 * Math.sin(state.clock.elapsedTime * 10.0 + p.phase) * (1 - lifeN);
+
+      const ang = Math.atan2(p.dir.y, p.dir.x) + swirl * lifeN;
+
+      const x = Math.cos(ang) * dist + wob * p.dir.y;
+      const y = Math.sin(ang) * dist * 0.55 - wob * p.dir.x;
+
+      dummy.position.set(x, y, p.z);
+
+      const s = p.size * (1.0 - lifeN * 0.55);
+      dummy.scale.set(s, s, 1);
+
+      dummy.rotation.set(0, 0, ang + p.spin * t);
+      dummy.updateMatrix();
+      inst.setMatrixAt(i, dummy.matrix);
+    }
+
+    inst.instanceMatrix.needsUpdate = true;
+
+    if (t >= LIFE) {
+      fx.active = false;
+      fx.t = 0;
+    }
+  });
+
+  return (
+    <instancedMesh ref={instRef} args={[null, null, particles.length]}>
+      <planeGeometry args={[1, 1, 1, 1]} />
+      <meshBasicMaterial
+        ref={matRef}
+        transparent
+        depthWrite={false}
+        blending={AdditiveBlending}
+        map={spriteTex}
+        alphaMap={spriteTex}
+        opacity={0}
+        color={"white"}
+      />
+    </instancedMesh>
+  );
+}
+
+function EnergyRays({ spriteTex, fxRef, count = 24, seed = 7331 }) {
+  const instRef = useRef();
+  const matRef = useRef();
+  const dummy = useMemo(() => new Object3D(), []);
+
+  const rays = useMemo(() => {
+    const rand = mulberry32(seed);
+    const arr = [];
+    for (let i = 0; i < count; i++) {
+      const ang = (i / count) * Math.PI * 2 + (rand() * 0.25 - 0.125);
+      const len = 0.9 + rand() * 1.9;
+      const w = 0.06 + rand() * 0.12;
+      const rot = (rand() * 2 - 1) * 0.6;
+      arr.push({ ang, len, w, rot });
+    }
+    return arr;
+  }, [count, seed]);
+
+  useEffect(() => {
+    if (!instRef.current) return;
+    instRef.current.instanceMatrix.setUsage(DynamicDrawUsage);
+  }, []);
+
+  useFrame((_, delta) => {
+    const inst = instRef.current;
+    const mat = matRef.current;
+    if (!inst || !mat) return;
+
+    const fx = fxRef.current;
+    if (!fx.active) {
+      mat.opacity = 0;
+      return;
+    }
+
+    fx.t += delta;
+    const t = fx.t;
+
+    const LIFE = 0.35;
+    const n = Math.min(1, t / LIFE);
+
+    const fadeIn = smoothstep(0.0, 0.12, n);
+    const fadeOut = 1.0 - smoothstep(0.25, 1.0, n);
+    mat.opacity = 1.0 * fadeIn * fadeOut;
+
+    const grow = smoothstep(0.0, 0.25, n);
+
+    for (let i = 0; i < rays.length; i++) {
+      const r = rays[i];
+
+      const x = Math.cos(r.ang) * (0.2 + 0.35 * grow);
+      const y = Math.sin(r.ang) * (0.2 + 0.18 * grow) * 0.55;
+
+      dummy.position.set(x, y, 0.08);
+      dummy.rotation.set(0, 0, r.ang + r.rot);
+
+      dummy.scale.set(r.w, r.len * (0.7 + 0.9 * grow), 1);
+      dummy.updateMatrix();
+      inst.setMatrixAt(i, dummy.matrix);
+    }
+
+    inst.instanceMatrix.needsUpdate = true;
+
+    if (t >= LIFE) {
+      fx.active = false;
+      fx.t = 0;
+    }
+  });
+
+  return (
+    <instancedMesh ref={instRef} args={[null, null, rays.length]}>
+      <planeGeometry args={[1, 1, 1, 1]} />
+      <meshBasicMaterial
+        ref={matRef}
+        transparent
+        depthWrite={false}
+        blending={AdditiveBlending}
+        map={spriteTex}
+        alphaMap={spriteTex}
+        opacity={0}
+        color={"white"}
+      />
+    </instancedMesh>
+  );
+}
+
 /* ------------------------------------------------------------------ */
+/* ✅ Ajuste: subimos nebulaOpacity en star y supergiant para que el fondo NO se oscurezca tanto */
 
 const STAGES = {
   nebula: {
@@ -452,7 +642,7 @@ const STAGES = {
     spin: 0.05,
     nebulaOpacity: 1.0,
     diskOpacity: 0.0,
-    highlightOpacity: 0.0,
+    emissive: "#ffffff",
   },
   star: {
     coreGlow: 1.35,
@@ -460,40 +650,38 @@ const STAGES = {
     coreScale: 1.05,
     diskScale: 1.6,
     spin: 0.5,
-    nebulaOpacity: 0.45,
+    nebulaOpacity: 0.62, // ⬅️ antes 0.45 (se oscurecía demasiado)
     diskOpacity: 0.5,
-    highlightOpacity: 0.25,
+    emissive: "#fff6d6",
   },
   supergiant: {
-    coreGlow: 2.2,
+    // “gigante roja”
+    coreGlow: 2.35,
     coreOpacity: 1.0,
-    coreScale: 1.25,
-    diskScale: 2.6,
-    spin: 0.9,
-    nebulaOpacity: 0.25,
-    diskOpacity: 0.65,
-    highlightOpacity: 0.35,
+    coreScale: 1.42,
+    diskScale: 3.15,
+    spin: 1.05,
+    nebulaOpacity: 0.48, // ⬅️ antes 0.28 (muy oscuro)
+    diskOpacity: 0.75,
+    emissive: "#ff6a2a",
   },
 };
 
 const GAS_BASE = [
-  { scale: [9.6, 5.4, 1], pos: [0.0, 0.0, -0.35], rotZ: 0.10 },
+  { scale: [9.6, 5.4, 1], pos: [0.0, 0.0, -0.35], rotZ: 0.1 },
   { scale: [7.8, 4.3, 1], pos: [0.6, -0.2, -0.28], rotZ: -0.22 },
   { scale: [6.3, 3.7, 1], pos: [-0.7, 0.25, -0.25], rotZ: 0.32 },
   { scale: [5.6, 3.2, 1], pos: [1.05, 0.15, -0.22], rotZ: -0.55 },
-  { scale: [5.2, 3.0, 1], pos: [-1.05, -0.15, -0.20], rotZ: 0.62 },
+  { scale: [5.2, 3.0, 1], pos: [-1.05, -0.15, -0.2], rotZ: 0.62 },
 ];
 
-const GAS_SPEEDS = [0.010, 0.012, 0.009, 0.008, 0.007];
+const GAS_SPEEDS = [0.01, 0.012, 0.009, 0.008, 0.007];
 
 export default function BlackHoleSignature({ stage = "nebula" }) {
   const coreRef = useRef();
   const coreMatRef = useRef();
   const diskRef = useRef();
   const diskMatRef = useRef();
-
-  const highlightMatRef = useRef();
-  const highlightOpacityRef = useRef(STAGES.nebula.highlightOpacity);
 
   const nebulaOuterMatRef = useRef();
   const nebulaMidMatRef = useRef();
@@ -519,13 +707,19 @@ export default function BlackHoleSignature({ stage = "nebula" }) {
 
   const swirlStarsOpacityRef = useRef(1);
 
-  // ✅ fx refs
   const microFlashRef = useRef({ a: 0, s: 1.0 });
   const burstRef = useRef({ a: 0, s: 2.8 });
   const shockRef = useRef({ a: 0, s: 0.15 });
 
+  const burstParticlesFxRef = useRef({ active: false, t: 0 });
+  const energyRaysFxRef = useRef({ active: false, t: 0 });
+
   const lastStageRef = useRef("nebula");
   const gasStartRef = useRef(null);
+
+  const tlRef = useRef(null);
+
+  const coreEmissiveRef = useRef({ r: 1, g: 1, b: 1 });
 
   const BASE_OUTER = 1.6;
   const BASE_MID = 1.35;
@@ -541,16 +735,232 @@ export default function BlackHoleSignature({ stage = "nebula" }) {
     return t;
   }, []);
 
-  useFrame((state, delta) => {
+  const setEmissiveToStage = useCallback((k) => {
+    const col = new Color(STAGES[k].emissive);
+    coreEmissiveRef.current.r = col.r;
+    coreEmissiveRef.current.g = col.g;
+    coreEmissiveRef.current.b = col.b;
+    if (coreMatRef.current) coreMatRef.current.emissive.setRGB(col.r, col.g, col.b);
+  }, []);
+
+  const tweenEmissiveToStage = useCallback((tl, k, at, dur = 0.9, ease = "power2.out") => {
+    const col = new Color(STAGES[k].emissive);
+    tl.to(coreEmissiveRef.current, { r: col.r, g: col.g, b: col.b, duration: dur, ease }, at);
+  }, []);
+
+  const fireBoom = useCallback(
+    ({
+      shockA = 0.9,
+      shockS = 0.15,
+      burstA = 1.0,
+      burstS = 3.4,
+      microA = 0.9,
+      microS = 1.2,
+      rays = true,
+      particles = true,
+    } = {}) => {
+      shockRef.current.a = shockA;
+      shockRef.current.s = shockS;
+
+      burstRef.current.a = burstA;
+      burstRef.current.s = burstS;
+
+      microFlashRef.current.a = microA;
+      microFlashRef.current.s = microS;
+
+      if (rays) {
+        energyRaysFxRef.current.active = true;
+        energyRaysFxRef.current.t = 0;
+      }
+      if (particles) {
+        burstParticlesFxRef.current.active = true;
+        burstParticlesFxRef.current.t = 0;
+      }
+    },
+    []
+  );
+
+  const captureGasPolar = useCallback(() => {
+    const meshes = [
+      gasAMeshRef.current,
+      gasBMeshRef.current,
+      gasCMeshRef.current,
+      gasDMeshRef.current,
+      gasEMeshRef.current,
+    ];
+
+    if (meshes.every(Boolean)) {
+      gasStartRef.current = meshes.map((m) => {
+        const x = m.position.x;
+        const y = m.position.y;
+        return {
+          r0: Math.hypot(x, y),
+          theta0: Math.atan2(y, x),
+          z0: m.position.z,
+          scale: [m.scale.x, m.scale.y, m.scale.z],
+          rotZ: m.rotation.z,
+        };
+      });
+    } else {
+      gasStartRef.current = null;
+    }
+  }, []);
+
+  const applyStageToRefs = useCallback(
+    (k) => {
+      const s = STAGES[k];
+      nebulaOpacityRef.current = s.nebulaOpacity;
+      spinRef.current = s.spin;
+
+      if (coreRef.current) coreRef.current.scale.set(s.coreScale, s.coreScale, s.coreScale);
+      if (coreMatRef.current) {
+        coreMatRef.current.opacity = s.coreOpacity;
+        coreMatRef.current.emissiveIntensity = s.coreGlow;
+      }
+
+      if (diskRef.current) diskRef.current.scale.set(s.diskScale, s.diskScale, 1);
+      if (diskMatRef.current) diskMatRef.current.opacity = s.diskOpacity;
+
+      setEmissiveToStage(k);
+    },
+    [setEmissiveToStage]
+  );
+
+  const runNebulaToStar = useCallback(
+    (tl, at = 0) => {
+      captureGasPolar();
+
+      swirlTargetRef.current = swirlRef.current;
+      swirlStarsOpacityRef.current = 1;
+
+      tl.to(swirlTargetRef, { current: 1, duration: 1.6, ease: "power3.inOut" }, at);
+      tl.to(nebulaOpacityRef, { current: STAGES.star.nebulaOpacity, duration: 1.2, ease: "power2.out" }, at + 0.1);
+
+      tl.add(() => {
+        fireBoom({
+          shockA: 0.95,
+          shockS: 0.15,
+          burstA: 1.0,
+          burstS: 3.6,
+          microA: 0.95,
+          microS: 1.25,
+          rays: true,
+          particles: true,
+        });
+      }, at + 1.42);
+
+      const s = STAGES.star;
+
+      if (coreRef.current) {
+        tl.to(coreRef.current.scale, { x: s.coreScale, y: s.coreScale, z: s.coreScale, duration: 0.45, ease: "power3.out" }, at + 1.48);
+      }
+      if (coreMatRef.current) {
+        tl.to(coreMatRef.current, { opacity: s.coreOpacity, emissiveIntensity: s.coreGlow, duration: 0.55, ease: "power3.out" }, at + 1.48);
+      }
+      tweenEmissiveToStage(tl, "star", at + 1.48, 0.7, "power2.out");
+
+      if (diskRef.current) {
+        tl.to(diskRef.current.scale, { x: s.diskScale, y: s.diskScale, z: 1, duration: 0.9, ease: "power3.out" }, at + 1.58);
+      }
+      if (diskMatRef.current) {
+        tl.to(diskMatRef.current, { opacity: s.diskOpacity, duration: 0.7, ease: "power2.out" }, at + 1.58);
+      }
+
+      tl.to(spinRef, { current: s.spin, duration: 0.9, ease: "power2.out" }, at + 1.58);
+      tl.to(swirlStarsOpacityRef, { current: 0, duration: 0.35, ease: "power2.out" }, at + 1.48);
+
+      return at + 2.05;
+    },
+    [captureGasPolar, fireBoom, tweenEmissiveToStage]
+  );
+
+  const runStarToSupergiant = useCallback(
+    (tl, at = 0) => {
+      const s = STAGES.supergiant;
+
+      if (coreRef.current) {
+        tl.to(
+          coreRef.current.scale,
+          {
+            keyframes: [
+              { x: STAGES.star.coreScale * 1.04, y: STAGES.star.coreScale * 1.04, z: STAGES.star.coreScale * 1.04, duration: 0.18, ease: "power2.out" },
+              { x: STAGES.star.coreScale * 0.985, y: STAGES.star.coreScale * 0.985, z: STAGES.star.coreScale * 0.985, duration: 0.22, ease: "power2.inOut" },
+              { x: STAGES.star.coreScale * 1.06, y: STAGES.star.coreScale * 1.06, z: STAGES.star.coreScale * 1.06, duration: 0.20, ease: "power2.out" },
+            ],
+          },
+          at
+        );
+      }
+
+      tl.add(() => {
+        fireBoom({ shockA: 0.65, shockS: 0.28, burstA: 0.85, burstS: 3.2, microA: 0.35, microS: 1.1, rays: true, particles: true });
+      }, at + 0.18);
+
+      tl.add(() => {
+        fireBoom({ shockA: 0.95, shockS: 0.18, burstA: 1.0, burstS: 4.4, microA: 0.55, microS: 1.25, rays: true, particles: true });
+      }, at + 0.52);
+
+      if (coreMatRef.current) {
+        tl.to(coreMatRef.current, { emissiveIntensity: s.coreGlow, opacity: s.coreOpacity, duration: 1.0, ease: "power3.out" }, at + 0.15);
+      }
+      tweenEmissiveToStage(tl, "supergiant", at + 0.1, 1.2, "power2.out");
+
+      if (coreRef.current) {
+        tl.to(
+          coreRef.current.scale,
+          {
+            keyframes: [
+              { x: s.coreScale * 0.92, y: s.coreScale * 0.92, z: s.coreScale * 0.92, duration: 0.22, ease: "power2.in" },
+              { x: s.coreScale * 1.04, y: s.coreScale * 1.04, z: s.coreScale * 1.04, duration: 0.30, ease: "power3.out" },
+              { x: s.coreScale, y: s.coreScale, z: s.coreScale, duration: 0.55, ease: "power3.out" },
+            ],
+          },
+          at + 0.35
+        );
+      }
+
+      if (diskRef.current) {
+        tl.to(
+          diskRef.current.scale,
+          {
+            keyframes: [
+              { x: s.diskScale * 0.85, y: s.diskScale * 0.85, z: 1, duration: 0.25, ease: "power2.in" },
+              { x: s.diskScale * 1.06, y: s.diskScale * 1.06, z: 1, duration: 0.35, ease: "power3.out" },
+              { x: s.diskScale, y: s.diskScale, z: 1, duration: 0.55, ease: "power3.out" },
+            ],
+          },
+          at + 0.35
+        );
+      }
+      if (diskMatRef.current) {
+        tl.to(diskMatRef.current, { opacity: s.diskOpacity, duration: 1.0, ease: "power2.out" }, at + 0.35);
+      }
+
+      // ✅ aquí estaba el oscurecimiento: ahora el target nebulaOpacity es más alto (ver STAGES)
+      tl.to(nebulaOpacityRef, { current: s.nebulaOpacity, duration: 1.0, ease: "power2.out" }, at + 0.2);
+      tl.to(spinRef, { current: s.spin, duration: 1.2, ease: "power2.out" }, at + 0.2);
+
+      tl.add(() => {
+        energyRaysFxRef.current.active = true;
+        energyRaysFxRef.current.t = 0;
+        burstParticlesFxRef.current.active = true;
+        burstParticlesFxRef.current.t = 0;
+      }, at + 1.15);
+
+      return at + 1.6;
+    },
+    [fireBoom, tweenEmissiveToStage]
+  );
+
+  useFrame((_, delta) => {
     if (coreRef.current) coreRef.current.rotation.y += delta * 0.12;
     if (diskRef.current) diskRef.current.rotation.y += delta * spinRef.current;
 
-    if (highlightMatRef.current) highlightMatRef.current.opacity = highlightOpacityRef.current;
+    if (coreMatRef.current) {
+      coreMatRef.current.emissive.setRGB(coreEmissiveRef.current.r, coreEmissiveRef.current.g, coreEmissiveRef.current.b);
+    }
 
-    // suavizado del progreso
-    swirlRef.current +=
-      (swirlTargetRef.current - swirlRef.current) *
-      (1 - Math.pow(0.0008, delta));
+    swirlRef.current += (swirlTargetRef.current - swirlRef.current) * (1 - Math.pow(0.0008, delta));
 
     const o = nebulaOpacityRef.current;
 
@@ -566,13 +976,7 @@ export default function BlackHoleSignature({ stage = "nebula" }) {
 
     const p = swirlRef.current;
 
-    const meshes = [
-      gasAMeshRef.current,
-      gasBMeshRef.current,
-      gasCMeshRef.current,
-      gasDMeshRef.current,
-      gasEMeshRef.current,
-    ];
+    const meshes = [gasAMeshRef.current, gasBMeshRef.current, gasCMeshRef.current, gasDMeshRef.current, gasEMeshRef.current];
 
     if (p < 0.0001) {
       for (let i = 0; i < meshes.length; i++) {
@@ -616,85 +1020,9 @@ export default function BlackHoleSignature({ stage = "nebula" }) {
     const prev = lastStageRef.current;
     lastStageRef.current = stage;
 
-    // highlight según stage
-    const targetHighlight = STAGES[stage]?.highlightOpacity ?? 0;
-    gsap.to(highlightOpacityRef, {
-      current: targetHighlight,
-      duration: stage === "nebula" ? 0.25 : 0.6,
-      ease: "power2.out",
-      overwrite: true,
-    });
-
-    if (prev === "nebula" && stage === "star") {
-      const meshes = [
-        gasAMeshRef.current,
-        gasBMeshRef.current,
-        gasCMeshRef.current,
-        gasDMeshRef.current,
-        gasEMeshRef.current,
-      ];
-
-      // captura polar
-      if (meshes.every(Boolean)) {
-        gasStartRef.current = meshes.map((m) => {
-          const x = m.position.x;
-          const y = m.position.y;
-          return {
-            r0: Math.hypot(x, y),
-            theta0: Math.atan2(y, x),
-            z0: m.position.z,
-            scale: [m.scale.x, m.scale.y, m.scale.z],
-            rotZ: m.rotation.z,
-          };
-        });
-      } else {
-        gasStartRef.current = null;
-      }
-
-      swirlTargetRef.current = swirlRef.current;
-      swirlStarsOpacityRef.current = 1;
-
-      const tl = gsap.timeline({ defaults: { overwrite: true } });
-
-      // contracción
-      tl.to(swirlTargetRef, { current: 1, duration: 1.6, ease: "power3.inOut" }, 0);
-      tl.to(nebulaOpacityRef, { current: STAGES.star.nebulaOpacity, duration: 1.2, ease: "power2.out" }, 0.1);
-
-      // ✅ BOOM justo antes del encendido
-      // cuando ya está denso (~0.92), disparas shock + burst + microflash
-      tl.add(() => {
-        shockRef.current.a = 0.9;
-        shockRef.current.s = 0.15;
-
-        burstRef.current.a = 1.0;
-        burstRef.current.s = 3.4;
-
-        microFlashRef.current.a = 0.9;
-        microFlashRef.current.s = 1.2;
-      }, 1.42);
-
-      const s = STAGES.star;
-
-      // encendido del core inmediatamente después del boom
-      if (coreRef.current) {
-        tl.to(coreRef.current.scale, { x: s.coreScale, y: s.coreScale, z: s.coreScale, duration: 0.45, ease: "power3.out" }, 1.48);
-      }
-      if (coreMatRef.current) {
-        tl.to(coreMatRef.current, { opacity: s.coreOpacity, emissiveIntensity: s.coreGlow, duration: 0.55, ease: "power3.out" }, 1.48);
-      }
-
-      // aparece disco un poquito después
-      if (diskRef.current) {
-        tl.to(diskRef.current.scale, { x: s.diskScale, y: s.diskScale, z: 1, duration: 0.9, ease: "power3.out" }, 1.58);
-      }
-      if (diskMatRef.current) {
-        tl.to(diskMatRef.current, { opacity: s.diskOpacity, duration: 0.7, ease: "power2.out" }, 1.58);
-      }
-
-      tl.to(spinRef, { current: s.spin, duration: 0.9, ease: "power2.out" }, 1.58);
-      tl.to(swirlStarsOpacityRef, { current: 0, duration: 0.35, ease: "power2.out" }, 1.48);
-
-      return () => tl.kill();
+    if (tlRef.current) {
+      tlRef.current.kill();
+      tlRef.current = null;
     }
 
     if (stage === "nebula") {
@@ -702,17 +1030,43 @@ export default function BlackHoleSignature({ stage = "nebula" }) {
       swirlStarsOpacityRef.current = 1;
       gasStartRef.current = null;
 
-      // reset disco
-      if (diskRef.current) diskRef.current.scale.set(STAGES.nebula.diskScale, STAGES.nebula.diskScale, 1);
-      if (diskMatRef.current) diskMatRef.current.opacity = STAGES.nebula.diskOpacity;
-      spinRef.current = STAGES.nebula.spin;
+      applyStageToRefs("nebula");
 
-      // reset fx
       microFlashRef.current.a = 0; microFlashRef.current.s = 1.0;
       burstRef.current.a = 0; burstRef.current.s = 2.8;
       shockRef.current.a = 0; shockRef.current.s = 0.15;
+      burstParticlesFxRef.current.active = false; burstParticlesFxRef.current.t = 0;
+      energyRaysFxRef.current.active = false; energyRaysFxRef.current.t = 0;
+
+      return;
     }
-  }, [stage]);
+
+    const tl = gsap.timeline({ defaults: { overwrite: true } });
+    tlRef.current = tl;
+
+    if (prev === "nebula" && stage === "star") {
+      runNebulaToStar(tl, 0);
+      return () => tl.kill();
+    }
+
+    if (prev === "star" && stage === "supergiant") {
+      runStarToSupergiant(tl, 0);
+      return () => tl.kill();
+    }
+
+    if (prev === "nebula" && stage === "supergiant") {
+      const endStar = runNebulaToStar(tl, 0);
+      runStarToSupergiant(tl, endStar + 0.08);
+      return () => tl.kill();
+    }
+
+    applyStageToRefs(stage);
+    return () => tl.kill();
+  }, [stage, applyStageToRefs, runNebulaToStar, runStarToSupergiant]);
+
+  useEffect(() => {
+    applyStageToRefs("nebula");
+  }, [applyStageToRefs]);
 
   return (
     <group>
@@ -732,16 +1086,44 @@ export default function BlackHoleSignature({ stage = "nebula" }) {
         opacityRef={swirlStarsOpacityRef}
       />
 
-      {/* ✅ EXPLOSION FX */}
+      {/* FX */}
+      <EnergyRays spriteTex={spriteTex} fxRef={energyRaysFxRef} />
       <ShockwaveRing shockRef={shockRef} />
       <BurstSprite spriteTex={spriteTex} burstRef={burstRef} />
-      {/* (Opcional) tu flash anterior */}
       <MicroExplosion spriteTex={spriteTex} flashRef={microFlashRef} />
+      <BurstParticles spriteTex={spriteTex} fxRef={burstParticlesFxRef} />
 
       {/* Partículas */}
-      <NebulaLayer count={1000} radius={6.6} seed={1337} color="#6a4cff" size={0.12} rot={0.02} materialRef={nebulaOuterMatRef} spriteTex={spriteTex} />
-      <NebulaLayer count={820} radius={5.0} seed={2024} color="#ff4fbf" size={0.095} rot={0.035} materialRef={nebulaMidMatRef} spriteTex={spriteTex} />
-      <NebulaLayer count={600} radius={3.6} seed={777} color="#8fd3ff" size={0.07} rot={0.05} materialRef={nebulaCoreMatRef} spriteTex={spriteTex} />
+      <NebulaLayer
+        count={1000}
+        radius={6.6}
+        seed={1337}
+        color="#6a4cff"
+        size={0.12}
+        rot={0.02}
+        materialRef={nebulaOuterMatRef}
+        spriteTex={spriteTex}
+      />
+      <NebulaLayer
+        count={820}
+        radius={5.0}
+        seed={2024}
+        color="#ff4fbf"
+        size={0.095}
+        rot={0.035}
+        materialRef={nebulaMidMatRef}
+        spriteTex={spriteTex}
+      />
+      <NebulaLayer
+        count={600}
+        radius={3.6}
+        seed={777}
+        color="#8fd3ff"
+        size={0.07}
+        rot={0.05}
+        materialRef={nebulaCoreMatRef}
+        spriteTex={spriteTex}
+      />
 
       {/* Núcleo */}
       <mesh ref={coreRef}>
@@ -759,7 +1141,11 @@ export default function BlackHoleSignature({ stage = "nebula" }) {
       </mesh>
 
       {/* Disco */}
-      <mesh ref={diskRef} rotation={[Math.PI / 2.2, 0, 0]} scale={[STAGES.nebula.diskScale, STAGES.nebula.diskScale, 1]}>
+      <mesh
+        ref={diskRef}
+        rotation={[Math.PI / 2.2, 0, 0]}
+        scale={[STAGES.nebula.diskScale, STAGES.nebula.diskScale, 1]}
+      >
         <ringGeometry args={[1.3, 2.2, 64]} />
         <meshStandardMaterial
           ref={diskMatRef}
@@ -768,20 +1154,6 @@ export default function BlackHoleSignature({ stage = "nebula" }) {
           emissiveIntensity={0.6}
           transparent
           opacity={STAGES.nebula.diskOpacity}
-          side={2}
-        />
-      </mesh>
-
-      {/* Highlight */}
-      <mesh rotation={[Math.PI / 2.2, 0, 0]} scale={[2.1, 2.1, 1]} position={[0.25, 0, 0]}>
-        <ringGeometry args={[1.75, 1.9, 64]} />
-        <meshStandardMaterial
-          ref={highlightMatRef}
-          color={"#666666"}
-          emissive={"white"}
-          emissiveIntensity={0.9}
-          transparent
-          opacity={0}
           side={2}
         />
       </mesh>
